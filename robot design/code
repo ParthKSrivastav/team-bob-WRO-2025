@@ -1,0 +1,225 @@
+from gpiozero import Robot, Motor, Pin
+from gpiozero.pins.rpigpio import RPiGPIOPin
+from gpiozero import DistanceSensor
+import serial, time
+import numpy as np
+import logging
+from logging import handlers
+#from multiprocessing import Pool
+log_filename = "wro-2024.log"
+handler = handlers.TimedRotatingFileHandler(log_filename, 'midnight', 10)
+FORMAT="%(asctime)s.%(msecs)03d %(name)s %(levelname)s %(lineno)d %(message)s"
+formatter = logging.Formatter(FORMAT)
+handler.setFormatter(formatter)
+logging.basicConfig(level=logging.INFO, format=FORMAT)
+
+logger = logging.getLogger(_name_)
+
+logger.addHandler(handler)
+
+
+class Robot:
+    
+    def _init_(self, driving, steering, luna):
+        self.driving = driving
+        self.steering = steering
+        self.luna = luna
+        
+    def move_forward(self, speed=0.5):
+        self.driving.forward(speed=speed)
+        
+    def turn_right(self, speed=0.5):
+        self.steering.backward(speed=speed)
+        
+    def turn_left(self, speed=0.5):
+        self.steering.forward(speed=speed)
+        
+    def move_backward(self, speed=0.5):
+        self.driving.backward(speed=speed)
+        
+    def stop(self):
+        self.driving.stop()
+        self.steering.stop()
+        self.wait(timeout=0.1)
+        
+    def stop_steering(self):
+        self.steering.stop()
+        self.wait(timeout=0.1)
+        
+    def wait(self, timeout=1):
+        try:
+            time.sleep(timeout)
+        except:
+            pass
+        
+    def keep_straight(self):
+        self.stop_steering()
+        self.turn_left(speed=0.2)
+        self.wait(timeout=0.1)
+        self.turn_right(speed=0.2)
+        self.wait(timeout=0.1)
+        self.stop_steering()
+    
+    def move_back(self, speed=0.5):
+        logger.info("move back")
+        self.turn_left(speed=0.8)
+        self.move_backward(speed=speed)
+        self.wait(1)
+        self.keep_straight()
+        self.wait(timeout=0.5)
+        self.stop()
+        
+    def move_straight(self, speed=0.5):
+        logger.info("move straight")
+        #self.stop()
+        front_distance, left_distance, right_distance = self.luna.get_distance()
+        self.safeguard(front_distance, left_distance, right_distance)
+        self.move_forward(speed=speed)
+        self.keep_straight()
+        
+        while front_distance > 120:
+            logger.info(f"{front_distance=} {left_distance=} {right_distance=}", end="\r")
+            self.wait(timeout=0.1)
+            front_distance, left_distance, right_distance = self.luna.get_distance()
+            self.safeguard(front_distance, left_distance, right_distance)
+        logger.info(f"stopping with {front_distance=} {left_distance=} {right_distance=}")
+        self.safeguard(front_distance, left_distance, right_distance)
+        self.stop()
+        
+    def move_left(self, speed=0.5):
+        #self.stop()
+        logger.info("turning left")
+        front_distance, left_distance, right_distance = self.luna.get_distance()
+        self.safeguard(front_distance, left_distance, right_distance)
+        self.turn_left(speed=speed)
+        self.move_forward(speed=speed)
+
+        timeout = 0.0
+        while front_distance> 50 and timeout < 0.5:
+            logger.info(f"{front_distance=} {left_distance=} {right_distance=}", end="\r")
+            self.wait(timeout=0.1)
+            timeout += 0.1
+            front_distance, left_distance, right_distance = self.luna.get_distance()
+        logger.info(f"stopping with {front_distance=} {left_distance=} {right_distance=}")
+        logger.info("turned left.")
+        #self.safeguard()
+        self.keep_straight()
+        self.stop()
+        
+    def move_right(self, speed=0.5):
+        #self.stop()
+        logger.info("turning right")
+        front_distance, left_distance, right_distance = self.luna.get_distance()
+        self.safeguard(front_distance, left_distance, right_distance)
+        self.turn_right(speed=speed)
+        self.move_forward(speed=speed)
+
+        timeout = 0.0
+        while front_distance* 125 > 50 and right_distance > 10 and timeout < 1.5:
+            logger.info(f"{front_distance=} {left_distance=} {right_distance=}", end="\r")
+            self.wait(timeout=0.1)
+            timeout += 0.1
+            front_distance, left_distance, right_distance = self.luna.get_distance()
+        logger.info(f"stopping with {front_distance=} {left_distance=} {right_distance=}")
+        logger.info("turned right.")
+        #self.safeguard()
+        self.keep_straight()
+        self.stop()
+        
+    def safeguard(self, front_distance, left_distance, right_distance):
+        #front_distance, right_distance = self.luna.get_distance()
+        if front_distance < 50:
+            logger.info("safeguarding robot moving back")
+            self.stop()
+            self.move_back(speed=0.4)
+            self.stop()
+        if right_distance < 10:
+            logger.info("safeguarding robot moving left")
+            self.turn_left(speed=0.4)
+            self.wait(timeout=1)
+        if left_distance < 10:
+            logger.info("safeguarding robot moving right")
+            self.turn_right(speed=0.4)
+            self.wait(timeout=1)
+        
+
+class Luna:
+    def _init_(self, ser):
+        self.ser = ser
+        self.right_ultrasonic = DistanceSensor(echo=24, trigger=27)
+        self.left_ultrasonic = DistanceSensor(echo=21, trigger=20)
+        
+    def read_ultrasonic(self):
+        front_right = self.right_ultrasonic.distance * 100
+        front_left = self.left_ultrasonic.distance * 100
+        return front_left, front_right
+    
+    def get_distance(self):
+        front_left, front_right = self.read_ultrasonic()
+        return self.read_tf_luna(), front_left, front_right
+    
+    def read_tf_luna(self):
+        while True:
+            counter = self.ser.in_waiting
+            if counter > 8:
+                bytes_serial = self.ser.read(9)
+                self.ser.reset_input_buffer()
+                
+                if bytes_serial[0] ==0x59 and bytes_serial[1] == 0x59:
+                    distance = bytes_serial[2] + bytes_serial[3]*256
+                    #strength = bytes_serial[4] + bytes_serial[5]*256
+                    #temperature = bytes_serial[6] + bytes_serial[7]*256
+                    #temperature = (temperature / 8.0) - 256.0
+                    return distance #, strength , temperature
+            
+
+def move_in_lap(robot, forward_speed=0.5, turn_speed=0.5):
+    robot.move_straight(speed=forward_speed)
+    robot.move_right(speed=turn_speed)
+    robot.move_left(speed=0.3)    
+    robot.move_straight(speed=forward_speed)
+    robot.move_right(speed=turn_speed)
+    robot.move_left(speed=0.3)
+    robot.move_straight(speed=forward_speed)
+    robot.move_right(speed=turn_speed)
+    robot.move_left(speed=0.3)
+    robot.move_straight(speed=forward_speed)
+    robot.move_right(speed=turn_speed)
+    robot.move_left(speed=0.3)
+
+def move(robot, num_laps=1, forward_speed=0.6, turn_speed=0.8):
+    lap = 1
+    while lap <= num_laps:
+        logger.info(f"{lap=}")
+        move_in_lap(robot, forward_speed=0.6, turn_speed=0.8)
+        lap += 1
+    robot.stop()
+    logger.info("completed")
+
+
+if _name=="main_":
+    logger.info()
+    #robot = get_robot()
+    #logger.info(robot)
+    #cleanup([17,18,22,23])
+    #driving = Motor(17, 18)
+    #steering = Motor(22, 23)
+    forward_speed=0.5
+    turn_speed=0.5
+    ser = serial.Serial("/dev/serial0", 115200, timeout=0)
+    driving = Motor(17, 18)
+    steering = Motor(22, 23)
+    if ser.isOpen() == False:
+        ser.open()
+    luna = Luna(ser)
+
+    robot = Robot(driving, steering, luna)
+    #robot.move_back()
+    #move(robot, 3, forward_speed=forward_speed, turn_speed=turn_speed)
+    #pool = Pool(processes=2)
+    #pool.apply(safeguard, args=())
+    #pool.apply(move, args=(3,))
+    #a,b,c = luna.get_distance()
+    #logger.info(f"{a=} {b=} {c=}")
+    #logger.info(luna.right_ultrasonic.distance)
+    logger.info("this is my current log")
